@@ -3,8 +3,14 @@
 #define BUTTON1 PA_7
 #define BUTTON2 PA_0
 
+unsigned long timeDelay = millis();
+
 void interrup(){
-  digitalWrite(LED, !digitalRead(LED));
+  unsigned long currentTime = millis();
+  if(currentTime - timeDelay > 200){
+    digitalWrite(LED, !digitalRead(LED));
+    timeDelay = currentTime;
+  }
 }
 
 void setup() {
