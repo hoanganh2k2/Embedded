@@ -8,9 +8,9 @@
 #include <AudioOutputI2S.h>
 #include <SPIFFS.h>
 
-#define DHT11_PIN 18
-#define GAS_PIN 34    
-#define FIRE_PIN 35
+#define DHT11_PIN 19
+#define GAS_PIN 39
+#define FIRE_PIN 18
 DHTesp dht;
 
 #define WIFI_SSID "SH3 P402"
@@ -64,11 +64,23 @@ unsigned long timeNow = 0;
 char msg[MSG_BUFFER_SIRE];
 
 AudioGeneratorMP3 *mp3;
-AudioFileSourceFS *gasAudio;
 AudioFileSourceFS *fireAudio;
-AudioFileSourceFS *temperatureAudio;
+AudioFileSourceFS *minGasAudio;
+AudioFileSourceFS *maxGasAudio;
+AudioFileSourceFS *minTemperatureAudio;
+AudioFileSourceFS *maxTemperatureAudio;
+AudioFileSourceFS *minHumidityAudio;
+AudioFileSourceFS *maxHumidityAudio;
 int typeAudio;
 AudioOutputI2S *out;
+
+float min_Temperature;
+float max_Temperature;
+float min_Gas;
+float max_Gas;
+float min_Humidity;
+float max_Humidity;
+JsonDocument config;
 
 void setup_wifi(){
   Serial.print("Connecting to ");
@@ -90,33 +102,20 @@ void setup_audio(){
   }
 
   Serial.println("✅ SPIFFS đã sẵn sàng.");
-  if (!SPIFFS.exists("/music.mp3")) {
-    Serial.println("❌ Không tìm thấy file /music.mp3");
-  }
-  if (!SPIFFS.exists("/gas.mp3")) {
-    Serial.println("❌ Không tìm thấy file /gas.mp3");
-    return;
-  }
-  if (!SPIFFS.exists("/fire.mp3")) {
-    Serial.println("❌ Không tìm thấy file /fire.mp3");
-    return;
-  }
-  if (!SPIFFS.exists("/temperature.mp3")) {
-    Serial.println("❌ Không tìm thấy file /temperature.mp3");
-    return;
-  }
 
   fireAudio = new AudioFileSourceFS(SPIFFS, "/fire.mp3");
-  gasAudio = new AudioFileSourceFS(SPIFFS, "/gas.mp3");
-  temperatureAudio = new AudioFileSourceFS(SPIFFS, "/temperature.mp3");
+  minGasAudio = new AudioFileSourceFS(SPIFFS, "/minGas.mp3");
+  maxGasAudio = new AudioFileSourceFS(SPIFFS, "/maxGas.mp3");
+  minTemperatureAudio = new AudioFileSourceFS(SPIFFS, "/minTemperature.mp3");
+  maxTemperatureAudio = new AudioFileSourceFS(SPIFFS, "/maxTemperature.mp3");
+  minHumidityAudio = new AudioFileSourceFS(SPIFFS, "/minHumidity.mp3");
+  maxHumidityAudio = new AudioFileSourceFS(SPIFFS, "/maxHumidity.mp3");
   out = new AudioOutputI2S();
 
   out->SetPinout(26, 25, 22);
-  out->SetGain(0.4);
+  out->SetGain(0.5);
 
   mp3 = new AudioGeneratorMP3();
-  mp3->begin(gasAudio, out);
-  typeAudio = 3;
 }
 
 void reconnect(){
@@ -141,47 +140,108 @@ void publishMessage(const char* topic, String payload, boolean retained) {
     Serial.println("Message published [" + String(topic) + "]: " + payload);
 }
 
+void loadConfig() {
+  File file = SPIFFS.open("/config.json", "r");
+  if (!file) {
+    Serial.println("❌ Không tìm thấy file config.");
+    return;
+  }
+
+  DeserializationError error = deserializeJson(config, file);
+
+  if (error) {
+    Serial.print("❌ Lỗi khi đọc file config: ");
+    Serial.println(error.c_str());
+    file.close();
+    return;
+  }
+
+  min_Temperature = config["min_Temperature"];
+  max_Temperature = config["max_Temperature"];
+  min_Gas = config["min_Gas"];
+  max_Gas = config["max_Gas"];
+  min_Humidity = config["min_Humidity"];
+  max_Humidity = config["max_Humidity"];
+
+  file.close();
+}
+
 void callback(char* topic, byte* payload, unsigned int length) {
   String incommingMessage = "";
   for (int i = 0; i < length; i++) incommingMessage += (char)payload[i];
   Serial.println("Message arrived [" + String(topic) + "] " + incommingMessage);
-}
 
-void warning(float temp, int gas, int fire) {
-  int newType = 0;
-
-  if (gas > 900) {
-    newType = 1;
-  } else if (fire == 0) {
-    newType = 2;
-  } else if (temp > 40) {
-    newType = 3;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, incommingMessage);
+  if(error){
+    Serial.println("❌ Failed to parse incoming JSON: " + String(error.c_str()));
+    return;
   }
 
-  if (newType != 0) {
-    if (mp3 && mp3->isRunning()) {
-      if (!mp3->loop()) {
-        // Phát lại file nếu kết thúc
-        switch (typeAudio) {
-          case 1: gasAudio->seek(0, SEEK_SET); mp3->begin(gasAudio, out); break;
-          case 2: fireAudio->seek(0, SEEK_SET); mp3->begin(fireAudio, out); break;
-          case 3: temperatureAudio->seek(0, SEEK_SET); mp3->begin(temperatureAudio, out); break;
-        }
+  JsonObject obj = doc.as<JsonObject>();
+  if(obj["getConfig"].is<int>()){
+      JsonDocument config;
+      config["min_Temperature"] = min_Temperature;
+      config["max_Temperature"] = max_Temperature;
+      config["min_Gas"] = min_Gas;
+      config["max_Gas"] = max_Gas;
+      config["min_Humidity"] = min_Humidity;
+      config["max_Humidity"] = max_Humidity;
+      serializeJson(config, mqtt_message);
+      publishMessage("esp32/config", mqtt_message, true);
+  }
+
+  if(obj["setConfig"].is<int>()){
+    min_Temperature = obj["min_Temperature"];
+    max_Temperature = obj["max_Temperature"];
+    min_Gas = obj["min_Gas"];
+    max_Gas = obj["max_Gas"];
+    min_Humidity = obj["min_Humidity"];
+    max_Humidity = obj["max_Humidity"];
+
+    JsonDocument newConfig;
+    newConfig["min_Temperature"] = min_Temperature;
+    newConfig["max_Temperature"] = max_Temperature;
+    newConfig["min_Gas"] = min_Gas;
+    newConfig["max_Gas"] = max_Gas;
+    newConfig["min_Humidity"] = min_Humidity;
+    newConfig["max_Humidity"] = max_Humidity;
+
+    File configFile = SPIFFS.open("/config.json", FILE_WRITE);
+    if(!configFile) Serial.println("❌ Không thể mở config.json");
+    else {
+      if (serializeJson(newConfig, configFile) == 0) {
+        Serial.println("❌ Ghi config.json thất bại.");
+      }else {
+        Serial.println("✅ Cập nhật config.json thành công.");
       }
-    } else {
-      // Nếu chưa chạy, bắt đầu phát âm thanh mới
-      switch (newType) {
-        case 1: gasAudio->seek(0, SEEK_SET); mp3->begin(gasAudio, out); break;
-        case 2: fireAudio->seek(0, SEEK_SET); mp3->begin(fireAudio, out); break;
-        case 3: temperatureAudio->seek(0, SEEK_SET); mp3->begin(temperatureAudio, out); break;
-      }
+      configFile.close();
+    }
+  }
+}
+
+void warning(float temp, int gas, int fire, float humidity) {
+  int newType = 0;
+  if (fire == 0) newType = 1;
+  else if (gas < min_Gas) newType = 2;
+  else if (gas > max_Gas) newType = 3;
+  else if (temp < min_Temperature) newType = 4;
+  else if (temp > max_Temperature) newType = 5;
+  else if (humidity < min_Humidity) newType = 6;
+  else if (humidity > max_Humidity) newType = 7;
+
+  if (newType != 0 && newType != typeAudio) {
+    switch (newType) {
+      case 1: fireAudio->seek(0, SEEK_SET); mp3->begin(fireAudio, out); break;
+      case 2: minGasAudio->seek(0, SEEK_SET); mp3->begin(minGasAudio, out); break;
+      case 3: maxGasAudio->seek(0, SEEK_SET); mp3->begin(maxGasAudio, out); break;
+      case 4: minTemperatureAudio->seek(0, SEEK_SET); mp3->begin(minTemperatureAudio, out); break;
+      case 5: maxTemperatureAudio->seek(0, SEEK_SET); mp3->begin(maxTemperatureAudio, out); break;
+      case 6: minHumidityAudio->seek(0, SEEK_SET); mp3->begin(minHumidityAudio, out); break;
+      case 7: maxHumidityAudio->seek(0, SEEK_SET); mp3->begin(maxHumidityAudio, out); break;
     }
     typeAudio = newType;
-  } else {
-    // Nếu mọi thứ an toàn, dừng âm thanh
-    if (mp3 && mp3->isRunning()) {
-      mp3->stop();
-    }
+  } else if (newType == 0 && mp3 && mp3->isRunning()) {
     typeAudio = 0;
   }
 }
@@ -193,11 +253,17 @@ void setup() {
   pinMode(FIRE_PIN, INPUT);
   setup_wifi();
 
-  setup_audio();
-
   espClient.setCACert(root_ca); 
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
+  
+  delay(1000);
+  setup_audio();
+  if(!client.connected()){
+    reconnect();
+  }
+  client.loop();
+  loadConfig();
 }
 
 void loop() {
@@ -206,8 +272,22 @@ void loop() {
   }
   client.loop();
 
+  if (mp3 && mp3->isRunning()) {
+    if (!mp3->loop()) {
+      switch (typeAudio) {
+        case 1: fireAudio->seek(0, SEEK_SET); mp3->begin(fireAudio, out); break;
+        case 2: minGasAudio->seek(0, SEEK_SET); mp3->begin(minGasAudio, out); break;
+        case 3: maxGasAudio->seek(0, SEEK_SET); mp3->begin(maxGasAudio, out); break;
+        case 4: minTemperatureAudio->seek(0, SEEK_SET); mp3->begin(minTemperatureAudio, out); break;
+        case 5: maxTemperatureAudio->seek(0, SEEK_SET); mp3->begin(maxTemperatureAudio, out); break;
+        case 6: minHumidityAudio->seek(0, SEEK_SET); mp3->begin(minHumidityAudio, out); break;
+        case 7: maxHumidityAudio->seek(0, SEEK_SET); mp3->begin(maxHumidityAudio, out); break;
+      }
+    }
+  }
+
   timeNow = millis();
-  if(timeNow - lastMsg > 3000){
+  if(timeNow - lastMsg > 1500){
     lastMsg = timeNow;
 
     float h = dht.getHumidity();
@@ -215,14 +295,15 @@ void loop() {
     int gasValue = analogRead(GAS_PIN);
     int fireDetected = digitalRead(FIRE_PIN);
     
+    warning(t, gasValue, fireDetected, h);
+
     JsonDocument doc;
     doc["humidity"] = h;
     doc["temperature"] = t;
     doc["gas"] = gasValue;
     doc["fire"] =  fireDetected == 0 ? "Cháyyy" : "An toàn";
+    doc["warning"] = typeAudio;
     serializeJson(doc, mqtt_message);
     publishMessage("esp32/factory/status", mqtt_message, true);
-
-    warning(t, gasValue, fireDetected);
   }
 }
