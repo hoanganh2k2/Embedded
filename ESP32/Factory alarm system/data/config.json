@@ -1,0 +1,8 @@
+{
+    "min_Temperature": 25.0,
+    "max_Temperature": 32.0,
+    "min_Gas": 100.0,
+    "max_Gas": 700.0,
+    "min_Humidity": 30.0,
+    "max_Humidity": 80.0
+}
